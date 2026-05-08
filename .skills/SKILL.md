@@ -85,7 +85,7 @@ find src -name "*.cpp" -o -name "*.h" | xargs clang-format -i
 * `partitions.csv`: ESP32 flash partition layout
 
 ### Build Environment
-* **Standard**: C++20 (`-std=c++2a`). No Exceptions, No RTTI.
+* **Standard**: C++20 with GNU extensions (`-std=gnu++2a`). No Exceptions, No RTTI.
 * **Logging**: ALWAYS use `LOG_INF`, `LOG_DBG`, or `LOG_ERR` from `Logging.h`. Raw Serial output is deprecated.
 * **Environments** (in `platformio.ini`):
   * `default`: Development (LOG_LEVEL=2, serial enabled)
@@ -247,7 +247,7 @@ When a template is necessary, limit instantiations: use explicit template instan
 
 ### Error Handling Philosophy
 
-**Source**: [src/main.cpp:132-143](../src/main.cpp), [lib/GfxRenderer/GfxRenderer.cpp:10](../lib/GfxRenderer/GfxRenderer.cpp)
+**Source**: [src/activities/ActivityManager.cpp](../src/activities/ActivityManager.cpp), [lib/GfxRenderer/GfxRenderer.cpp:10](../lib/GfxRenderer/GfxRenderer.cpp)
 
 **Pattern Hierarchy**:
 1. **LOG_ERR + return false** (90%): `LOG_ERR("MOD", "Failed: %s", reason); return false;`
@@ -352,31 +352,27 @@ Constraint: Physical button positions are fixed on hardware, but their logical f
 
 ### Activity Lifecycle and Memory Management
 
-**Source**: [src/main.cpp:132-143](../src/main.cpp)
+**Source**: [src/activities/ActivityManager.cpp](../src/activities/ActivityManager.cpp), [src/activities/Activity.h](../src/activities/Activity.h)
 
-**CRITICAL**: Activities are **heap-allocated** and **deleted on exit**.
+**CRITICAL**: Activities are owned as `std::unique_ptr<Activity>` by `ActivityManager`. Navigation is **deferred** — transitions are queued as `pendingActivity` + `pendingAction` and executed at the top of the manager's loop while holding a `RenderLock`. This avoids the "delete this" hazard when an activity requests its own replacement from inside `loop()`.
 
 ```cpp
-// main.cpp navigation pattern
-void exitActivity() {
-  if (currentActivity) {
-    currentActivity->onExit();
-    delete currentActivity;  // Activity deleted here!
-    currentActivity = nullptr;
-  }
-}
+// ActivityManager owns one current activity and a stack of suspended ones.
+std::unique_ptr<Activity>              currentActivity;
+std::vector<std::unique_ptr<Activity>> stackActivities;  // suspended activities
 
-void enterNewActivity(Activity* activity) {
-  currentActivity = activity;  // Heap-allocated activity
-  currentActivity->onEnter();
-}
+// Three navigation actions:
+// - Replace: tear down current AND clear the stack, then enter the new activity
+// - Push:    move current onto stackActivities (kept alive, not torn down), then enter the new activity
+// - Pop:     destroy current, restore the top of stackActivities (no re-onEnter)
 ```
 
 **Memory Implications**:
-- Activity navigation = `delete` old activity + `new` create next activity
-- Any memory allocated in `onEnter()` MUST be freed in `onExit()`
-- FreeRTOS tasks MUST be deleted in `onExit()` before activity destruction
-- File handles MUST be closed in `onExit()`
+- `Replace` destroys `currentActivity` AND every activity on the stack — any memory they hold is freed via their `onExit()` and destructors.
+- `Push` keeps the previous activity *alive in memory* on `stackActivities`. Its `onExit()` is **not** called — only `onEnter()` of the new activity runs. Be conservative about heap held across a Push.
+- Any memory allocated in `onEnter()` MUST be freed in `onExit()` (or the destructor for Pop'd-and-discarded activities).
+- FreeRTOS tasks MUST be deleted in `onExit()` before the activity is destroyed.
+- File handles MUST be closed in `onExit()`.
 
 **Activity Pattern**:
 ```cpp
@@ -846,9 +842,9 @@ rm -rf /path/to/sd/.crosspoint/epub_<hash>/sections/
 
 **Source**: `lib/Epub/Epub/Section.cpp`, `lib/Epub/Epub/BookMetadataCache.cpp`
 
-**Current Versions** (as of docs/file-formats.md):
-- `book.bin`: **Version 5** (metadata structure)
-- `section.bin`: **Version 12** (layout structure)
+**Source-of-truth constants** (read these directly — do not rely on numbers cached in this doc):
+- `book.bin`: `BOOK_CACHE_VERSION` in `lib/Epub/Epub/BookMetadataCache.cpp`
+- `section.bin`: `SECTION_FILE_VERSION` in `lib/Epub/Epub/Section.cpp`
 
 **Version Increment Rules**:
 1. **ALWAYS increment version** BEFORE changing binary structure
@@ -857,8 +853,8 @@ rm -rf /path/to/sd/.crosspoint/epub_<hash>/sections/
 
 **Example** (incrementing section format version):
 ```cpp
-// lib/Epub/Epub/Section.cpp
-static constexpr uint8_t SECTION_FILE_VERSION = 13;  // Was 12, now 13
+// lib/Epub/Epub/Section.cpp — bump the constant, not just add a field
+constexpr uint8_t SECTION_FILE_VERSION = /* old + 1 */;
 
 // Add new field to structure
 struct PageLine {
