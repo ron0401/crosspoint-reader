@@ -19,6 +19,7 @@ parser.add_argument("--additional-intervals", dest="additional_intervals", actio
 parser.add_argument("--compress", dest="compress", action="store_true", help="Compress glyph bitmaps using DEFLATE with group-based compression.")
 parser.add_argument("--force-autohint", dest="force_autohint", action="store_true", help="Force FreeType auto-hinter instead of native font hinting. Improves stem width consistency for fonts with weak or no native TrueType hints.")
 parser.add_argument("--pnum", dest="pnum", action="store_true", help="Use proportional numerals (pnum OpenType feature) instead of default tabular figures. Reduces visual gaps between digits in running prose.")
+parser.add_argument("--no-kerning", dest="no_kerning", action="store_true", help="Skip kerning extraction. Required when the resulting glyph set produces more than 255 left/right kerning classes (e.g. CJK-augmented UI fonts), since the on-device class index is uint8_t. Kerning is barely visible at small UI sizes anyway.")
 args = parser.parse_args()
 
 GlyphProps = namedtuple("GlyphProps", ["width", "height", "advance_x", "left", "top", "data_length", "data_offset", "code_point"])
@@ -517,12 +518,15 @@ def extract_kerning_fonttools(font_path, codepoints, ppem, pnum_subs=None):
 ppem = size * 150.0 / 72.0
 
 kern_map = {}  # (leftCp, rightCp) -> adjust
-for face_idx, cps in face_idx_cps.items():
-    font_path = args.fontstack[face_idx]
-    subs = pnum_kern_subs.get(face_idx) if args.pnum else None
-    kern_map.update(extract_kerning_fonttools(font_path, cps, ppem, pnum_subs=subs))
+if args.no_kerning:
+    print("kerning: skipped (--no-kerning)", file=sys.stderr)
+else:
+    for face_idx, cps in face_idx_cps.items():
+        font_path = args.fontstack[face_idx]
+        subs = pnum_kern_subs.get(face_idx) if args.pnum else None
+        kern_map.update(extract_kerning_fonttools(font_path, cps, ppem, pnum_subs=subs))
 
-print(f"kerning: {len(kern_map)} pairs extracted", file=sys.stderr)
+    print(f"kerning: {len(kern_map)} pairs extracted", file=sys.stderr)
 
 # --- Derive class-based kerning from pairs ---
 kern_left_classes = []   # list of (codepoint, classId)
